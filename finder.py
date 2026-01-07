@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import re
 import os
+import plotly.express as px  # [핵심] NameError 해결을 위한 라이브러리 추가
 from datetime import datetime
 from urllib.parse import urlparse, quote
 
@@ -18,13 +19,13 @@ def get_config():
         "COUPANG": st.secrets.get("COUPANG_PARTNERS_ID", "AF1234567"),
         "NAVER_BLOG": st.secrets.get("NAVER_AD_ID", "yhw923"),
         "LINKPRICE": st.secrets.get("LINKPRICE_AFF_ID", "A100701775"),
-        "MIN_WAGE": 10030, # 2026년 최저임금 기준
+        "MIN_WAGE": 10030,
         "ST_COLS": ['날짜', '유저ID', '쇼핑몰', '상품명', '결제금액', '아낀금액', '똑똑지수', '기다림비용', '암호', '암호힌트']
     }
 
 CONFIG = get_config()
-st.set_page_config(page_title="Zen Master v7.5", layout="wide")
-LOG_FILE = 'zen_master_v75_db.csv'
+st.set_page_config(page_title="Zen Master v7.6", layout="wide")
+LOG_FILE = 'zen_master_v76_db.csv'
 
 # [3. 데이터 및 인증 엔진]
 def load_data():
@@ -60,25 +61,24 @@ with st.sidebar:
         st.warning("🟡 로그인이 필요합니다.")
 
     st.divider()
-    # [피드백 반영] 최저 하한선 0원 설정
     time_val = st.slider("나의 시간 가치 (원/시간)", 0, 200000, CONFIG["MIN_WAGE"], 500)
     wait_cost = int((15/60) * time_val + 3000)
 
-# [5. 메인 UI: 세 개의 탭으로 구성]
-tab1, tab2, tab3 = st.tabs(["🔍 퀀트 분석", "📊 Zen 대시보드", "📖 데이터 관리"])
+# [5. 메인 UI: 세 개의 탭 통합]
+tab1, tab2, tab3 = st.tabs(["🔍 퀀트 분석", "📊 Zen 통찰 대시보드", "⚙️ 데이터 교정 센터"])
 
 with tab1:
-    # [피드백 반영] 검색 입력란 복구
+    # [복구] 검색 입력 필드
     with st.container(border=True):
-        url_in = st.text_input("상품 URL (ID 자동추출)")
+        url_in = st.text_input("상품 URL (ID 자동추출 지원)")
         m = re.search(r'([A-Z]+[0-9]+|[0-9]+[A-Z]+)[A-Z0-9]*', url_in.upper())
         c1, c2 = st.columns(2)
         name_in = c1.text_input("상품 식별명", value=m.group() if m else "")
         price_in = c2.number_input("현재 탐지 가격(원)", min_value=0, step=1000)
 
-    if st.button("🚀 통찰 프로세스 시작", use_container_width=True):
+    if st.button("🚀 분석 시작", use_container_width=True):
         if name_in and price_in:
-            with st.spinner('시장 데이터를 명상 중...'):
+            with st.spinner('데이터의 흐름을 분석 중...'):
                 cid, csec = st.secrets["NAVER_CLIENT_ID"], st.secrets["NAVER_CLIENT_SECRET"]
                 res = requests.get(f"https://openapi.naver.com/v1/search/shop.json?query={name_in}&display=15",
                                    headers={"X-Naver-Client-Id": cid, "X-Naver-Client-Secret": csec})
@@ -93,7 +93,7 @@ with tab1:
                     st.session_state.search_results = sorted(list({v['p']: v for v in valid}.values()), key=lambda x: x['p'])[:3]
 
     if st.session_state.search_results:
-        st.subheader("📊 분석 리포트")
+        st.subheader("📊 기다림의 비용 분석 리포트")
         for i, res in enumerate(st.session_state.search_results):
             with st.container(border=True):
                 adj = st.number_input(f"최종 정산(±원) - 후보 {i+1}", step=1000, key=f"adj_{i}")
@@ -101,59 +101,55 @@ with tab1:
                 diff = final_p - price_in
                 net_benefit = (price_in - final_p) - wait_cost
                 
-                # [피드백 반영] 이모지 차액 표시
                 icon = "🔵" if diff <= 0 else "🔴"
                 st.markdown(f"#### 후보 {i+1}: **{final_p:,}원** ({res['m']}) {icon} {diff:+,}원")
-                st.caption(f"📝 {res['t']}") # 상세 상품명 노출
+                st.caption(f"📝 {res['t']}")
                 
                 if net_benefit > 0:
-                    st.success(f"🚀 **추천: 이 대안으로 전환하세요!** ({net_benefit:,}원 순이익)")
+                    st.success(f"🚀 **추천: 이 대안으로 구매하세요!** ({net_benefit:,}원 순이익)")
                 else:
-                    st.warning(f"🛒 **보류: 원래 상품을 유지하세요.** (기다림 비용 {wait_cost:,}원 제외 시 손해)")
+                    st.warning(f"🛒 **보류: 원래 보셨던 상품을 그대로 사세요.** (기회비용 {wait_cost:,}원 제외 시 손해)")
                 
                 col_l, col_r = st.columns([2, 1])
                 col_l.link_button("🌐 상품 페이지로 이동", res['l'], use_container_width=True)
                 
                 if status == "NEW":
-                    with st.expander("✨ 신규 등록을 위해 암호 힌트를 설정하세요"):
-                        hint_in = st.text_input("암호 힌트", key=f"h_{i}")
-                        if st.button("✅ 계정 생성 및 결과 기록", key=f"reg_{i}", use_container_width=True):
+                    with st.expander("✨ 첫 기록을 위한 암호 힌트 설정"):
+                        hint_in = st.text_input("힌트 입력", key=f"h_{i}")
+                        if st.button("✅ 계정 생성 및 저장", key=f"reg_{i}", use_container_width=True):
                             if upw != "" and hint_in != "":
                                 new_row = [[datetime.now().strftime('%Y-%m-%d %H:%M'), uid, res['m'], res['t'], final_p, price_in-final_p, round((price_in-final_p)/price_in*100,1), wait_cost, upw, hint_in]]
                                 pd.DataFrame(new_row, columns=CONFIG["ST_COLS"]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding='utf-8-sig')
                                 st.balloons(); st.rerun()
                 elif status == "SUCCESS":
-                    if st.button(f"✅ {uid} 님 기록 저장", key=f"save_{i}", use_container_width=True):
+                    if st.button(f"✅ {uid} 님 수행 기록 저장", key=f"save_{i}", use_container_width=True):
                         new_row = [[datetime.now().strftime('%Y-%m-%d %H:%M'), uid, res['m'], res['t'], final_p, price_in-final_p, round((price_in-final_p)/price_in*100,1), wait_cost, upw, user_df.iloc[0]['암호힌트']]]
                         pd.DataFrame(new_row, columns=CONFIG["ST_COLS"]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding='utf-8-sig')
                         st.balloons(); st.rerun()
 
 with tab2:
     if status == "SUCCESS" and not user_df.empty:
-        st.subheader("📊 통계적 통찰")
-        # 요일별/누적 성장 그래프 로직 (v6.9 동일)
+        st.subheader("📈 자산 방어 통찰")
         user_df['날짜'] = pd.to_datetime(user_df['날짜'])
-        st.plotly_chart(px.line(user_df.sort_values('날짜'), x='날짜', y=pd.to_numeric(user_df['아낀금액']).cumsum(), title='📈 자산 방어 성장 곡선'), use_container_width=True)
-    else: st.info("데이터가 충분하지 않습니다.")
+        # [해결] NameError 방지 로직 적용
+        st.plotly_chart(px.line(user_df.sort_values('날짜'), x='날짜', y=pd.to_numeric(user_df['아낀금액']).cumsum(), title='💰 누적 자산 방어 성장 곡선'), use_container_width=True)
+    else: st.info("데이터가 충분하지 않거나 로그인이 필요합니다.")
 
 with tab3:
     if status == "SUCCESS" and not user_df.empty:
-        st.subheader("⚙️ 데이터 교정 및 관리")
-        # [피드백 반영] 데이터 수정 및 삭제 도구
+        st.subheader("⚙️ 데이터 무결성 관리")
         with st.expander("📝 오타 정정하기"):
             edit_df = user_df.copy()
-            edit_df['식별자'] = edit_df['날짜'] + " | " + edit_df['상품명']
+            edit_df['식별자'] = edit_df['날짜'].dt.strftime('%Y-%m-%d') + " | " + edit_df['상품명']
             target = st.selectbox("수정할 기록 선택", options=edit_df.index, format_func=lambda x: edit_df.loc[x, '식별자'])
             if target is not None:
                 new_name = st.text_input("상품명 정정", value=edit_df.loc[target, '상품명'])
                 new_saved = st.number_input("절약액 정정", value=int(edit_df.loc[target, '아낀금액']))
-                if st.button("💾 수정 완료"):
+                if st.button("💾 수정 사항 적용"):
                     all_data = load_data()
                     all_data.at[target, '상품명'] = new_name
                     all_data.at[target, '아낀금액'] = new_saved
                     save_all(all_data)
         
-        if st.button("🚨 선택 항목 삭제", type="primary"):
-            # multiselect를 통한 삭제 로직 추가 가능
-            pass
+        st.divider()
         st.dataframe(user_df.sort_values(by='날짜', ascending=False), use_container_width=True)
