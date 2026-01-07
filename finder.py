@@ -12,7 +12,7 @@ from urllib.parse import urlparse, quote
 if 'search_results' not in st.session_state:
     st.session_state.search_results = None
 if 'user_id' not in st.session_state:
-    st.session_state.user_id = "이현우"
+    st.session_state.user_id = "명상자"
 
 # [2. Secrets 기반 설정 통합 로드]
 def get_config():
@@ -115,3 +115,4 @@ with tab1:
                 
                 # 기록 및 이동 버튼 로직 (v7.0과 동일)
                 pass
+
