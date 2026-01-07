@@ -3,125 +3,138 @@ import pandas as pd
 import requests
 import re
 import os
-import plotly.express as px
 from datetime import datetime
-from urllib.parse import urlparse, quote
+from io import BytesIO
+from urllib.parse import urlparse
 
-# [0. Secrets 기반 설정 로드]
-def get_config():
-    return {
-        "COUPANG": st.secrets.get("COUPANG_PARTNERS_ID", "NOT_SET"),
-        "NAVER_BLOG": st.secrets.get("NAVER_AD_ID", "NOT_SET"),
-        "LINKPRICE": st.secrets.get("LINKPRICE_AFF_ID", "NOT_SET"),
-        "MIN_WAGE": 10030, # 2026년 최저임금 기준
-        "ST_COLS": ['날짜', '유저ID', '쇼핑몰', '상품명', '결제금액', '아낀금액', '똑똑지수', '기다림비용', '암호', '암호힌트']
-    }
+# [0. 파트너스 설정 - 연구원님의 ID로 입력하세요]
+MY_COUPANG_ID = "AF1234567" 
+MY_NAVER_ID = "yhw923"
 
-CONFIG = get_config()
-st.set_page_config(page_title="Zen Master v7.0", layout="wide")
-LOG_FILE = 'zen_master_cloud_db.csv'
+# [1. 초기 설정 및 세션 관리]
+st.set_page_config(page_title="똑똑한 쇼핑 지킴이", layout="wide")
+LOG_FILE = 'savings_log.csv'
 
-# [1. 인증 및 티어 엔진]
-def get_zen_tier(savings):
-    if savings >= 500000: return "🌈 Zen 4: 깨달음을 얻은 마스터", "rainbow"
-    elif savings >= 150000: return "👁️ Zen 3: 통찰의 지혜", "violet"
-    elif savings >= 50000: return "🌊 Zen 2: 평온한 수행자", "blue"
-    else: return "🧘 Zen 1: 명상하는 초심자", "gray"
+if 'search_results' not in st.session_state:
+    st.session_state.search_results = None
 
-def verify_user(uid, upw):
-    if not os.path.exists(LOG_FILE): return "NEW", pd.DataFrame(columns=CONFIG["ST_COLS"])
-    df = pd.read_csv(LOG_FILE, on_bad_lines='skip', encoding='utf-8-sig')
-    user_data = df[df['유저ID'] == uid]
-    if user_data.empty: return "NEW", pd.DataFrame(columns=CONFIG["ST_COLS"])
-    # 암호 일치 여부 확인
-    if upw != "" and str(user_data.iloc[0]['암호']) == upw: return "SUCCESS", user_data
-    return "FAIL", user_data
+# [2. 필수 도우미 함수]
+def convert_to_affiliate(url, mall_name):
+    """링크를 파트너스 규격으로 치환합니다."""
+    if "쿠팡" in mall_name:
+        # 쿠팡 URL에서 상품 ID(숫자)를 정밀 추출합니다
+        product_id_match = re.search(r'products/(\d+)', url)
+        if product_id_match:
+            pid = product_id_match.group(1)
+            return f"https://link.coupang.com/re/AFFSDP?lptag={MY_COUPANG_ID}&subid=zen&pageKey={pid}"
+        return url
+    elif "네이버" in mall_name or "smartstore" in url:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}n_ad={MY_NAVER_ID}"
+    return url
 
-# [2. 사이드바: 0원부터 시작하는 시간 가치 및 상태 LED]
+def get_optimized_top3(query, current_price):
+    """배송비를 포함한 최적의 데이터 3개를 수집합니다."""
+    try:
+        client_id = st.secrets["NAVER_CLIENT_ID"]
+        client_secret = st.secrets["NAVER_CLIENT_SECRET"]
+        min_threshold = current_price * 0.3
+        
+        url = f"https://openapi.naver.com/v1/search/shop.json?query={query}&display=50&sort=sim"
+        headers = {"X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret}
+        
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            items = response.json().get('items', [])
+            valid_items = []
+            for item in items:
+                price = int(item['lprice'])
+                # 배송비 처리 (0 혹은 숫자로 변환)
+                ship_fee = int(item.get('shipping', 0)) if item.get('shipping', '').isdigit() else 0
+                
+                item_url = item['link']
+                mall = item.get('mallName', '일반쇼핑몰')
+                if "smartstore" in item_url or "brand.naver" in item_url:
+                    mall = "네이버"
+
+                if price >= min_threshold:
+                    valid_items.append({
+                        'base_price': price,
+                        'ship_fee': ship_fee,
+                        'total_price': price + ship_fee,
+                        'title': item['title'].replace("<b>", "").replace("</b>", ""),
+                        'link': item_url,
+                        'mall': mall
+                    })
+            # 총액 기준으로 중복 제거 및 정렬
+            unique_items = list({v['total_price']: v for v in valid_items}.values())
+            return sorted(unique_items, key=lambda x: x['total_price'])[:3]
+    except Exception as e:
+        st.error(f"분석 오류: {e}")
+    return []
+
+# [3. 사이드바 및 메뉴 구성]
 with st.sidebar:
     st.title("💎 Zen Master")
-    uid = st.text_input("사용자 ID", value="이현우")
-    upw = st.text_input("접근 암호", type="password")
-    
-    status, user_df = verify_user(uid, upw)
-    
-    # [피드백 반영] 로그인 상태 명확화
-    if status == "SUCCESS":
-        total_s = pd.to_numeric(user_df['아낀금액'], errors='coerce').sum()
-        tier_name, t_color = get_zen_tier(total_s)
-        st.success(f"🟢 **{uid}** 님 접속 중")
-        st.markdown(f"현재 경지: :{t_color}[{tier_name}]")
-        st.metric("누적 절약액", f"{int(total_s):,}원")
-    elif status == "FAIL" and upw != "":
-        st.error("🔴 암호가 틀립니다.")
-    else:
-        st.warning("🟡 로그인이 필요합니다.")
-
+    menu = st.radio("이동", ["🔍 지갑 지키기", "📖 절약 일기장", "📊 쇼핑 성적표"])
     st.divider()
-    # [피드백 반영] 하한선 0원 시간 가치 슬라이더
-    time_val = st.slider("나의 시간 가치 (원/시간)", 0, 200000, CONFIG["MIN_WAGE"], 500)
-    wait_cost = int((15/60) * time_val + 3000)
+    if st.button("🔄 검색 초기화"):
+        st.session_state.search_results = None
+        st.rerun()
 
-# [3. 메인 분석 엔진]
-tab1, tab2 = st.tabs(["🔍 퀀트 분석", "📊 Zen 대시보드"])
+# --- [메뉴 1: 지갑 지키기] ---
+if menu == "🔍 지갑 지키기":
+    st.title("🔍 실시간 최저가 탐지기")
+    item_url = st.text_input("상품 주소를 입력하세요 (선택)", placeholder="https://...")
+    
+    suggested_name = ""
+    if item_url:
+        path = urlparse(item_url).path.upper()
+        noise = ['HTTPS', 'WWW', 'COM', 'NAVER', 'BRAND', 'PRODUCTS', 'VIEW', 'SHOP']
+        for w in noise: path = path.replace(w, '')
+        model_match = re.search(r'([A-Z]+[0-9]+|[0-9]+[A-Z]+)[A-Z0-9]*', path)
+        suggested_name = model_match.group() if model_match else ""
 
-with tab1:
-    with st.container(border=True):
-        url_in = st.text_input("상품 URL (G마켓/옥션/쿠팡 등)")
-        # 모델명 자동 감지
-        m = re.search(r'([A-Z]+[0-9]+|[0-9]+[A-Z]+)[A-Z0-9]*', url_in.upper())
-        c1, c2 = st.columns(2)
-        name_in = c1.text_input("상품 식별명", value=m.group() if m else "")
-        price_in = c2.number_input("현재 탐지 가격(원)", min_value=0, step=1000)
+    col1, col2 = st.columns(2)
+    with col1:
+        item_input = st.text_input("상품명", value=suggested_name)
+    with col2:
+        current_price = st.number_input("현재 가격 (원)", min_value=0, step=100)
 
-    if st.button("🚀 통찰 프로세스 시작", use_container_width=True):
-        if name_in and price_in:
-            with st.spinner('시장 데이터를 명상 중...'):
-                cid, csec = st.secrets["NAVER_CLIENT_ID"], st.secrets["NAVER_CLIENT_SECRET"]
-                res = requests.get(f"https://openapi.naver.com/v1/search/shop.json?query={name_in}&display=15",
-                                   headers={"X-Naver-Client-Id": cid, "X-Naver-Client-Secret": csec})
-                if res.status_code == 200:
-                    items = res.json().get('items', [])
-                    valid = []
-                    for i in items:
-                        lp = int(i['lprice'])
-                        if lp >= price_in * 0.3:
-                            mall = "네이버" if any(x in i['link'] for x in ["smartstore", "brand.naver"]) else i['mallName']
-                            valid.append({'p': lp, 't': i['title'].replace("<b>","").replace("</b>",""), 'l': i['link'], 'm': mall})
-                    st.session_state.search_results = sorted(list({v['p']: v for v in valid}.values()), key=lambda x: x['p'])[:3]
+    if st.button("🔎 분석 시작"):
+        if item_input and current_price > 0:
+            with st.spinner('배송비 포함 최저가 분석 중...'):
+                st.session_state.search_results = get_optimized_top3(item_input, current_price)
+        else:
+            st.warning("정보를 입력해주세요.")
 
     if st.session_state.search_results:
+        st.subheader("📋 탐지된 최저가 후보 (배송비 포함)")
         for i, res in enumerate(st.session_state.search_results):
             with st.container(border=True):
-                adj = st.number_input(f"최종 정산(±원) - 후보 {i+1}", step=1000, key=f"adj_{i}")
-                final_p = res['p'] + adj
-                diff = final_p - price_in
-                net_benefit = (price_in - final_p) - wait_cost
+                c_info, c_action = st.columns([3, 1])
+                aff_link = convert_to_affiliate(res['link'], res['mall'])
                 
-                # [피드백 반영] 이모지 차액 표시
-                icon = "🔵" if diff <= 0 else "🔴"
-                st.markdown(f"#### 후보 {i+1}: **{final_p:,}원** ({res['m']}) {icon} {diff:+,}원")
-                st.caption(f"📝 {res['t']}") # [피드백 반영] 상세 상품명 작게 표기
+                with c_info:
+                    st.markdown(f"#### **[{res['mall']}] {res['total_price']:,}원** (배송비 {res['ship_fee']:,}원 포함)")
+                    st.caption(res['title'])
+                    extra_disc = st.number_input(f"쿠폰 등 추가 할인 (원)", min_value=0, step=1000, key=f"d_{i}")
+                    
+                    final_p = res['total_price'] - extra_disc
+                    savings = current_price - final_p
+                    score = round((savings / current_price) * 100, 1) if current_price > 0 else 0
+                    st.write(f"👉 **최종 실구매가: {final_p:,}원** (똑똑 지수: {score}점)")
                 
-                if net_benefit > 0:
-                    st.success(f"🚀 **추천: 이 대안으로 구매하세요!** ({net_benefit:,}원 순이익)")
-                else:
-                    st.warning(f"🛒 **보류: 원래 상품을 유지하세요.** (기다림 비용 {wait_cost:,}원 제외 시 손해)")
-                
-                col_l, col_r = st.columns([2, 1])
-                col_l.link_button("🌐 상품 상세 페이지로", res['l'], use_container_width=True)
-                
-                # [피드백 반영] 확정 버튼이 있는 힌트 입력 공정
-                if status == "NEW":
-                    with st.expander("✨ 신규 등록을 위해 암호 힌트를 설정하세요"):
-                        hint_in = st.text_input("힌트 입력 (예: 졸업연도)", key=f"h_{i}")
-                        if st.button("✅ 계정 생성 및 결과 기록", key=f"reg_{i}", use_container_width=True):
-                            if upw != "" and hint_in != "":
-                                new_row = [[datetime.now().strftime('%Y-%m-%d %H:%M'), uid, res['m'], res['t'], final_p, price_in-final_p, round((price_in-final_p)/price_in*100,1), wait_cost, upw, hint_in]]
-                                pd.DataFrame(new_row, columns=CONFIG["ST_COLS"]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding='utf-8-sig')
-                                st.balloons(); st.rerun()
-                elif status == "SUCCESS":
-                    if st.button(f"✅ {uid} 님 수행 기록 저장", key=f"save_{i}", use_container_width=True):
-                        new_row = [[datetime.now().strftime('%Y-%m-%d %H:%M'), uid, res['m'], res['t'], final_p, price_in-final_p, round((price_in-final_p)/price_in*100,1), wait_cost, upw, user_df.iloc[0]['암호힌트']]]
-                        pd.DataFrame(new_row, columns=CONFIG["ST_COLS"]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding='utf-8-sig')
-                        st.balloons(); st.rerun()
+                with c_action:
+                    st.link_button("🌐 이동", aff_link)
+                    if st.button(f"✅ 기록", key=f"s_{i}"):
+                        new_record = {
+                            '날짜': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                            '상품명': res['title'],
+                            '결제금액': current_price,
+                            '아낀금액': savings,
+                            '똑똑지수': score,
+                            '링크': aff_link
+                        }
+                        pd.DataFrame([new_record]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding='utf-8-sig')
+                        st.balloons()
